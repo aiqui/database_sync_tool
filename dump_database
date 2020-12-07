@@ -34,4 +34,4 @@ for db in ${SYNC_DATABASES}; do
 done
 [ $found -eq 0 ] && errorMsg "Error: database is not available to download: ${database}"
 
-mysqldump --single-transaction "${database}" -u "${MYSQL_USER}" -h "${MYSQL_HOST}" | gzip -cn
+mysqldump --no-tablespaces --single-transaction "${database}" -u "${MYSQL_USER}" -h "${MYSQL_HOST}" | gzip -cn
