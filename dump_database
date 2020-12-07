@@ -1,0 +1,37 @@
+#!/bin/bash
+
+PROGRAM=$( basename "${0}" )
+ENV_FILE=${PROGRAM}.env
+
+_setEnvVars() {
+    while read line; do
+        # Remove any comments
+        line="$( echo ${line} | perl -pe 's/^ *#.*//')"
+        var="$( echo "$line" | perl -pe 's/^ *(.*?) *=.*/\1/')"
+
+        # Valid variable
+        if [[ "${var}" =~ [A-Z] ]]; then
+
+            # Set variable if not already set
+            if [[ -z "${!var}" ]]; then
+                value="$( echo "$line" | perl -pe 's/^ *(.*?) *= *"?([^"]*).*/\2/')"
+                export ${var}="${value}"
+            fi
+        fi
+    done < "${ENV_FILE}"
+}
+
+# Get the env variables
+_setEnvVars
+
+# Get the database from the command line
+[ "${SSH_ORIGINAL_COMMAND}" != "" ] && database="${SSH_ORIGINAL_COMMAND}" || database="${1}"
+
+# Check for a valid database
+found=0
+for db in ${SYNC_DATABASES}; do
+    [ "${db}" = "${database}" ] && found=1
+done
+[ $found -eq 0 ] && errorMsg "Error: database is not available to download: ${database}"
+
+mysqldump --single-transaction "${database}" -u "${MYSQL_USER}" -h "${MYSQL_HOST}" | gzip -cn

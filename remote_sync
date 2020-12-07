@@ -1,0 +1,175 @@
+#!/bin/bash
+
+PROGRAM=$( basename "${0}" )
+ENV_FILE=${PROGRAM}.env
+
+cd "$( dirname "${BASH_SOURCE[0]}" )"
+
+_errorMsg() {
+   _cleanUp
+    echo "$*" 1>&2
+    exit -1
+}
+
+_statusMsg() {
+    echo "$*"
+}
+
+_setEnvVars() {
+    while read line; do
+        # Remove any comments
+        line="$( echo ${line} | perl -pe 's/^ *#.*//')"
+        var="$( echo "$line" | perl -pe 's/^ *(.*?) *=.*/\1/')"
+
+        # Valid variable
+        if [[ "${var}" =~ [A-Z] ]]; then
+
+            # Set variable if not already set
+            if [[ -z "${!var}" ]]; then
+                value="$( echo "$line" | perl -pe 's/^ *(.*?) *= *"?([^"]*).*/\2/')"
+                export ${var}="${value}"
+            fi
+        fi
+    done < "${ENV_FILE}"
+}
+
+# Get the env variables
+_setEnvVars
+
+# Add all remote databases here - must be available via remote script
+n=0
+for db in ${SYNC_DATABASES}; do
+  aRemoteDbs[$((++n))]=${db}
+done
+
+# Local tmp file
+tmp_file=/tmp/sync_dbs.tmp
+tmp_key=/tmp/sync_dbs_key.tmp
+
+_cleanUp() {
+    return
+   [ -f ${tmp_file} ] && rm ${tmp_file}
+   [ -f ${tmp_key} ] && rm ${tmp_key}
+}
+
+_catchInterrupt() {
+    stty sane
+    _cleanUp
+    echo
+    echo "Stopping..."
+    exit -1
+}
+
+_format() {
+    _errorMsg "Format: ${PROGRAM} [-p PASSWORD] [-h HOST] [-P PORT] [-s DATABASE] [-l DATABASE] [-d DATABASES]
+   -p PASSWORD  - set the local DB password
+   -h HOST      - set the local DB hostname (when not using localhost)
+   -P PORT      - set the local DB port
+   -s DATABASE  - set the production databases to download
+   -l DATABASE  - set the local databases to build
+   -d DATABASES - set a list of databases to download and build (delimited by commas or spaces)
+"
+}
+
+remote_db=
+databases=
+local_db=
+local_pw=
+local_host=
+local_port=
+while getopts "p:h:P:s:l:d:" FLAG; do
+  case "${FLAG}" in
+    p)
+        local_pw="${OPTARG}";;
+    h)
+        local_host="${OPTARG}";;
+    P)
+        local_port="${OPTARG}";;
+    s)
+        remote_db="${OPTARG}";;
+    l)
+        local_db="${OPTARG}";;
+    d)
+        databases="${OPTARG}";;
+    *)
+        _format;;
+  esac
+done
+
+# Catch CTRL-C for cleanup
+trap _catchInterrupt SIGINT
+
+# Get the remote database
+if [ "${remote_db}" != "" ] ; then
+    found=0
+    for db in "${aRemoteDbs[@]}"; do
+	   all_dbs="${all_dbs} ${db}"
+	   [ "${db}" = "${remote_db}" ] && found=1
+    done
+    [ ${found} -eq 0 ] && echo "Downloading unlisted RDS database: ${remote_db}"
+elif [ "${databases}" = "" ]; then
+    n=0
+    echo "Remote databases:"
+    for db in "${aRemoteDbs[@]}"; do
+	   echo "  $(( ++n )): ${db}"
+    done
+
+    echo
+    read -p "Select a remote database: " index
+    [[ "${index}" =~ ^[0-9]+$ ]] && [ ${index} -gt 0 -a ${index} -le ${#aRemoteDbs[@]} ] || _errorMsg "Exiting..."
+    remote_db="${aRemoteDbs[ ${index} ]}"
+fi
+
+# Get the local database
+if [ "${databases}" = "" ]; then
+    [ "${local_db}" == "" ] && read -p "Local target database (default: ${remote_db}): " local_db
+    [ "${local_db}" = "" ] && local_db="${remote_db}"
+    [[ "${local_db}" =~ ^[a-zA-Z0-9_]+$ ]] || _errorMsg "Invalid local database: ${local_db}"
+fi
+
+# Set the port parameter
+[ "${local_port}" = "" ] && port="" || port="-P ${local_port}"
+
+# Get the database credentials before the DB transfer
+[ "${local_pw}" == "" ] && read -sp "Local MySQL root password: " local_pw
+export MYSQL_PWD="${local_pw}"
+
+if [ "${databases}" = "" ]; then
+    mysql -u root ${port} -e 'SHOW TABLES' "${local_db}" 1> /dev/null || \
+	_errorMsg "Error: invalid credentials"
+else
+    db=$( echo "${databases}" | perl -pe 's/[ ,].*//' )
+    mysql -u root ${port} -e 'SHOW TABLES' "${db}" 1> /dev/null || \
+	_errorMsg "Error: invalid credentials"
+fi
+
+
+# Copy the private key and change permissions
+echo "${BASE64_PRIVATE_KEY}" | base64 -d > ${tmp_key}
+chmod 600 ${tmp_key}
+
+# Attempt to download the database using the forced command and SSH key
+echo
+echo
+echo "Note: SSH passphrase is the same as standard root MySQL password"
+
+if [ "${databases}" = "" ]; then
+    echo
+    echo "Downloading of RDS database ${remote_db} starting, please wait..."
+    ssh -i ${tmp_key} -p ${SSH_SYNC_PORT} ${SSH_SYNC_USER}@${SSH_SYNC_HOST} "${remote_db}" > "${tmp_file}"
+    [ $? != 0 ] && _errorMsg "Remote RDS dump appeared to fail"
+    echo "Downloading complete, rebuilding database"
+    gunzip -c "${tmp_file}" | mysql -u root ${port} "${local_db}" || _errorMsg "Rebuild failed"
+else
+    for db in $( echo "${databases}" | perl -pe 's/,/ /g' ) ; do
+	echo
+	echo "Downloading of RDS database ${db} starting, please wait..."
+	ssh -i ${tmp_key} -p ${SSH_SYNC_PORT} ${SSH_SYNC_USER}@${SSH_SYNC_HOST} "${db}" > "${tmp_file}"
+	[ $? != 0 ] && _errorMsg "Remote RDS dump appeared to fail"
+	echo "Downloading complete, rebuilding database"
+	gunzip -c "${tmp_file}" | mysql -u root ${port} "${db}" || _errorMsg "Rebuild failed"
+    done
+fi
+
+echo "Rebuild complete"
+_cleanUp
