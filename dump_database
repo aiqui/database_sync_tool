@@ -1,9 +1,16 @@
 #!/bin/bash
 
+cd "$( dirname "${BASH_SOURCE[0]}" )"
 PROGRAM=$( basename "${0}" )
 ENV_FILE=${PROGRAM}.env
 
+_errorMsg() {
+   echo "${1}" 1>&2
+   exit -1
+}
+
 _setEnvVars() {
+    [ -f "${ENV_FILE}" ] || _errorMsg "Error: missing configuration file: ${ENV_FILE}"
     while read line; do
         # Remove any comments
         line="$( echo ${line} | perl -pe 's/^ *#.*//')"
@@ -32,6 +39,6 @@ found=0
 for db in ${SYNC_DATABASES}; do
     [ "${db}" = "${database}" ] && found=1
 done
-[ $found -eq 0 ] && errorMsg "Error: database is not available to download: ${database}"
+[ $found -eq 0 ] && _errorMsg "Error: database is not available to download: ${database}"
 
 mysqldump --no-tablespaces --single-transaction "${database}" -u "${MYSQL_USER}" -h "${MYSQL_HOST}" | gzip -cn

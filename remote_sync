@@ -47,7 +47,6 @@ tmp_file=/tmp/sync_dbs.tmp
 tmp_key=/tmp/sync_dbs_key.tmp
 
 _cleanUp() {
-    return
    [ -f ${tmp_file} ] && rm ${tmp_file}
    [ -f ${tmp_key} ] && rm ${tmp_key}
 }
